@@ -470,7 +470,9 @@ void *retro_get_memory_data(unsigned type)
             data = &gb.rtc_real;
          else
             data = NULL;
-            break;
+         break;
+      default:
+         data = NULL;
     }
     
     return data;
@@ -499,9 +501,9 @@ size_t retro_get_memory_size(unsigned type)
          else
             size =  0;
          break;
-     default:
-        size = 0;
-       break;
+      default:
+         size = 0;
+      break;
    }
    
    return size;
