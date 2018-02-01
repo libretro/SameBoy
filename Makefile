@@ -50,7 +50,11 @@ CFLAGS += -IWindows
 LDFLAGS += -lmsvcrt -lSDL2main -Wl,/MANIFESTFILE:NUL
 SDL_LDFLAGS := -lSDL2 -lopengl32
 else
+ifneq ($(findstring Haiku,$(shell uname -s)),)
+LDFLAGS += -lbe -lm
+else
 LDFLAGS += -lc -lm
+endif
 endif
 
 ifeq ($(PLATFORM),Darwin)
