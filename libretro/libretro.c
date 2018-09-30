@@ -872,7 +872,10 @@ void retro_unload_game(void)
     }
 
     for (int i = 0; i < emulated_devices; i++)
+    {
+        log_cb(RETRO_LOG_INFO, "Unloading GB: %d\n", emulated_devices);
         GB_free(&gameboy[i]);
+    }
 }
 
 unsigned retro_get_region(void)
