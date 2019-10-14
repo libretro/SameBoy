@@ -19,8 +19,10 @@ endif
 
 ifeq ($(PLATFORM),Darwin)
 DEFAULT := cocoa
+HOSTCC := cc
 else
 DEFAULT := sdl
+HOSTCC := $(CC)
 endif
 
 default: $(DEFAULT)
@@ -330,7 +332,7 @@ $(OBJ)/BootROMs/SameBoyLogo.rle: $(OBJ)/BootROMs/SameBoyLogo.1bpp build/logo-com
 	./build/logo-compress < $< > $@
 
 build/logo-compress: BootROMs/logo-compress.c
-	$(CC) $< -o $@
+	$(HOSTCC) $< -o $@
 
 $(BIN)/BootROMs/agb_boot.bin: BootROMs/cgb_boot.asm
 $(BIN)/BootROMs/cgb_boot_fast.bin: BootROMs/cgb_boot.asm
