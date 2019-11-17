@@ -352,7 +352,7 @@ $(BIN)/BootROMs/%.bin: BootROMs/%.asm $(OBJ)/BootROMs/SameBoyLogo.pb8
 
 # Libretro Core (uses its own build system)
 libretro:
-	$(MAKE) -C libretro
+#	$(MAKE) -C libretro
 
 # Clean
 clean:

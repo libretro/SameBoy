@@ -1,3 +1,5 @@
+.NOTPARALLEL:
+
 STATIC_LINKING := 0
 AR             := ar
 
