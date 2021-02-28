@@ -150,7 +150,7 @@ static bool verify_and_update_state_compatibility(GB_gameboy_t *gb, GB_gameboy_t
 {
     if (save->ram_size == 0 && (&save->ram_size)[-1] == gb->ram_size) {
         /* This is a save state with a bad printer struct from a 32-bit OS */
-        memcpy(save->extra_oam + 4, save->extra_oam, (uintptr_t)&save->ram_size - (uintptr_t)&save->extra_oam);
+        memmove(save->extra_oam + 4, save->extra_oam, (uintptr_t)&save->ram_size - (uintptr_t)&save->extra_oam);
     }
     if (save->ram_size == 0) {
         /* Save doesn't have ram size specified, it's a pre 0.12 save state with potentially
@@ -161,6 +161,16 @@ static bool verify_and_update_state_compatibility(GB_gameboy_t *gb, GB_gameboy_t
         else {
             save->ram_size = gb->ram_size;
         }
+    }
+    
+    if (save->model & GB_MODEL_PAL_BIT_OLD) {
+        save->model &= ~GB_MODEL_PAL_BIT_OLD;
+        save->model |= GB_MODEL_PAL_BIT;
+    }
+    
+    if (save->model & GB_MODEL_NO_SFC_BIT_OLD) {
+        save->model &= ~GB_MODEL_NO_SFC_BIT_OLD;
+        save->model |= GB_MODEL_NO_SFC_BIT;
     }
     
     if (gb->version != save->version) {

@@ -113,11 +113,6 @@ static bool is_addr_in_dma_use(GB_gameboy_t *gb, uint16_t addr)
     return bus_for_addr(gb, addr) == bus_for_addr(gb, gb->dma_current_src);
 }
 
-static bool effective_ir_input(GB_gameboy_t *gb)
-{
-    return gb->infrared_input || (gb->io_registers[GB_IO_RP] & 1) || gb->cart_ir;
-}
-
 static uint8_t read_rom(GB_gameboy_t *gb, uint16_t addr)
 {
     if (addr < 0x100 && !gb->boot_rom_finished) {
@@ -173,7 +168,7 @@ static uint8_t read_mbc_ram(GB_gameboy_t *gb, uint16_t addr)
             case 0xD: // RTC status
                 return 1;
             case 0xE: // IR mode
-                return effective_ir_input(gb); // TODO: What are the other bits?
+                return gb->effective_ir_input; // TODO: What are the other bits?
             default:
                 GB_log(gb, "Unsupported HuC-3 mode %x read: %04x\n", gb->huc3_mode, addr);
                 return 1; // TODO: What happens in this case?
@@ -191,14 +186,20 @@ static uint8_t read_mbc_ram(GB_gameboy_t *gb, uint16_t addr)
     }
     
     if (gb->cartridge_type->mbc_type == GB_HUC1 && gb->huc1.ir_mode) {
-        return 0xc0 | effective_ir_input(gb);
+        return 0xc0 | gb->effective_ir_input;
     }
     
     if (gb->cartridge_type->has_rtc && gb->cartridge_type->mbc_type != GB_HUC3 &&
-        gb->mbc3_rtc_mapped && gb->mbc_ram_bank <= 4) {
+        gb->mbc3_rtc_mapped) {
         /* RTC read */
-        gb->rtc_latched.high |= ~0xC1; /* Not all bytes in RTC high are used. */
-        return gb->rtc_latched.data[gb->mbc_ram_bank];
+        if (gb->mbc_ram_bank <= 4) {
+            gb->rtc_latched.seconds &= 0x3F;
+            gb->rtc_latched.minutes &= 0x3F;
+            gb->rtc_latched.hours &= 0x1F;
+            gb->rtc_latched.high &= 0xC1;
+            return gb->rtc_latched.data[gb->mbc_ram_bank];
+        }
+        return 0xFF;
     }
 
     if (gb->camera_registers_mapped) {
@@ -215,6 +216,9 @@ static uint8_t read_mbc_ram(GB_gameboy_t *gb, uint16_t addr)
 
     uint8_t effective_bank = gb->mbc_ram_bank;
     if (gb->cartridge_type->mbc_type == GB_MBC3 && !gb->is_mbc30) {
+        if (gb->cartridge_type->has_rtc) {
+            if (effective_bank > 3) return 0xFF;
+        }
         effective_bank &= 0x3;
     }
     uint8_t ret = gb->mbc_ram[((addr & 0x1FFF) + effective_bank * 0x2000) & (gb->mbc_ram_size - 1)];
@@ -428,9 +432,12 @@ static uint8_t read_high_memory(GB_gameboy_t *gb, uint16_t addr)
             case GB_IO_RP: {
                 if (!gb->cgb_mode) return 0xFF;
                 /* You will read your own IR LED if it's on. */
-                uint8_t ret = (gb->io_registers[GB_IO_RP] & 0xC1) | 0x3C;
-                if ((gb->io_registers[GB_IO_RP] & 0xC0) == 0xC0 && effective_ir_input(gb)) {
-                    ret |= 2;
+                uint8_t ret = (gb->io_registers[GB_IO_RP] & 0xC1) | 0x2E;
+                if (gb->model != GB_MODEL_CGB_E) {
+                    ret |= 0x10;
+                }
+                if (((gb->io_registers[GB_IO_RP] & 0xC0) == 0xC0 && gb->effective_ir_input) && gb->model != GB_MODEL_AGB) {
+                    ret &= ~2;
                 }
                 return ret;
             }
@@ -652,14 +659,11 @@ static bool huc3_write(GB_gameboy_t *gb, uint8_t value)
             // Not sure what writes here mean, they're always 0xFE
             return true;
         case 0xE: { // IR mode
-            bool old_input = effective_ir_input(gb);
-            gb->cart_ir = value & 1;
-            bool new_input = effective_ir_input(gb);
-            if (new_input != old_input) {
+            if (gb->cart_ir != (value & 1)) {
+                gb->cart_ir = value & 1;
                 if (gb->infrared_callback) {
-                    gb->infrared_callback(gb, new_input, gb->cycles_since_ir_change);
+                    gb->infrared_callback(gb, value & 1);
                 }
-                gb->cycles_since_ir_change = 0;
             }
             return true;
         }
@@ -688,20 +692,22 @@ static void write_mbc_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
        && gb->cartridge_type->mbc_type != GB_HUC1) return;
     
     if (gb->cartridge_type->mbc_type == GB_HUC1 && gb->huc1.ir_mode) {
-        bool old_input = effective_ir_input(gb);
-        gb->cart_ir = value & 1;
-        bool new_input = effective_ir_input(gb);
-        if (new_input != old_input) {
+        if (gb->cart_ir != (value & 1)) {
+            gb->cart_ir = value & 1;
             if (gb->infrared_callback) {
-                gb->infrared_callback(gb, new_input, gb->cycles_since_ir_change);
+                gb->infrared_callback(gb, value & 1);
             }
-            gb->cycles_since_ir_change = 0;
         }
         return;
     }
 
-    if (gb->cartridge_type->has_rtc && gb->mbc3_rtc_mapped && gb->mbc_ram_bank <= 4) {
-        gb->rtc_latched.data[gb->mbc_ram_bank] = gb->rtc_real.data[gb->mbc_ram_bank] = value;
+    if (gb->cartridge_type->has_rtc && gb->mbc3_rtc_mapped) {
+        if (gb->mbc_ram_bank <= 4) {
+            if (gb->mbc_ram_bank == 0) {
+                gb->rtc_cycles = 0;
+            }
+            gb->rtc_latched.data[gb->mbc_ram_bank] = gb->rtc_real.data[gb->mbc_ram_bank] = value;
+        }
         return;
     }
 
@@ -711,6 +717,9 @@ static void write_mbc_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
     
     uint8_t effective_bank = gb->mbc_ram_bank;
     if (gb->cartridge_type->mbc_type == GB_MBC3 && !gb->is_mbc30) {
+        if (gb->cartridge_type->has_rtc) {
+            if (effective_bank > 3) return;
+        }
         effective_bank &= 0x3;
     }
 
@@ -903,6 +912,7 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                 if ((value & 0x80) && !(gb->io_registers[GB_IO_LCDC] & 0x80)) {
                     gb->display_cycles = 0;
                     gb->display_state = 0;
+                    gb->double_speed_alignment = 0;
                     if (GB_is_sgb(gb)) {
                         gb->frame_skip_state = GB_FRAMESKIP_SECOND_FRAME_RENDERED;
                     }
@@ -912,6 +922,7 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                 }
                 else if (!(value & 0x80) && (gb->io_registers[GB_IO_LCDC] & 0x80)) {
                     /* Sync after turning off LCD */
+                    gb->double_speed_alignment = 0;
                     GB_timing_sync(gb);
                     GB_lcd_off(gb);
                 }
@@ -1108,15 +1119,13 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                 if (!GB_is_cgb(gb)) {
                     return;
                 }
-                bool old_input = effective_ir_input(gb);
-                gb->io_registers[GB_IO_RP] = value;
-                bool new_input = effective_ir_input(gb);
-                if (new_input != old_input) {
+                if ((gb->io_registers[GB_IO_RP] ^ value) & 1) {
                     if (gb->infrared_callback) {
-                        gb->infrared_callback(gb, new_input, gb->cycles_since_ir_change);
+                        gb->infrared_callback(gb, value & 1);
                     }
-                    gb->cycles_since_ir_change = 0;
                 }
+                gb->io_registers[GB_IO_RP] = value;
+
                 return;
             }
 

@@ -213,6 +213,16 @@ static bool serial_end2(GB_gameboy_t *gb)
     return ret;
 }
 
+static void infrared_callback1(GB_gameboy_t *gb, bool output)
+{
+    GB_set_infrared_input(&gameboy[1], output);
+}
+
+static void infrared_callback2(GB_gameboy_t *gb, bool output)
+{
+    GB_set_infrared_input(&gameboy[0], output);
+}
+
 static uint32_t rgb_encode(GB_gameboy_t *gb, uint8_t r, uint8_t g, uint8_t b)
 {
     return r <<16 | g <<8 | b;
@@ -227,6 +237,7 @@ static const struct retro_variable vars_single[] = {
     { "sameboy_model", "Emulated model (Restart game); Auto|Game Boy|Game Boy Color|Game Boy Advance|Super Game Boy|Super Game Boy 2" },
     { "sameboy_border", "Display border; Super Game Boy only|always|never" },
     { "sameboy_rumble", "Enable rumble; rumble-enabled games|all games|never" },
+    { "sameboy_rtc", "Real Time Clock emulation; sync to system clock|accurate" },
     { NULL }
 };
 
@@ -351,12 +362,16 @@ static void set_link_cable_state(bool state)
         GB_set_serial_transfer_bit_end_callback(&gameboy[0], serial_end1);
         GB_set_serial_transfer_bit_start_callback(&gameboy[1], serial_start2);
         GB_set_serial_transfer_bit_end_callback(&gameboy[1], serial_end2);
+        GB_set_infrared_callback(&gameboy[0], infrared_callback1);
+        GB_set_infrared_callback(&gameboy[1], infrared_callback2);
     }
     else if (!state) { 
         GB_set_serial_transfer_bit_start_callback(&gameboy[0], NULL);
         GB_set_serial_transfer_bit_end_callback(&gameboy[0], NULL);
         GB_set_serial_transfer_bit_start_callback(&gameboy[1], NULL);
         GB_set_serial_transfer_bit_end_callback(&gameboy[1], NULL);
+        GB_set_infrared_callback(&gameboy[0], NULL);
+        GB_set_infrared_callback(&gameboy[1], NULL);
     }
 }
 
@@ -580,6 +595,17 @@ static void check_variables()
                 GB_set_rumble_mode(&gameboy[0], GB_RUMBLE_ALL_GAMES);
             }
         }
+        
+        var.key = "sameboy_rtc";
+        var.value = NULL;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+            if (strcmp(var.value, "sync to system clock") == 0) {
+                GB_set_rtc_mode(&gameboy[0], GB_RTC_MODE_SYNC_TO_HOST);
+            }
+            else if (strcmp(var.value, "accurate") == 0) {
+                GB_set_rtc_mode(&gameboy[0], GB_RTC_MODE_ACCURATE);
+            }
+        }
 
         var.key = "sameboy_high_pass_filter_mode";
         var.value = NULL;
@@ -640,6 +666,8 @@ static void check_variables()
     else {
         GB_set_border_mode(&gameboy[0], GB_BORDER_NEVER);
         GB_set_border_mode(&gameboy[1], GB_BORDER_NEVER);
+        GB_set_rtc_mode(&gameboy[0], GB_RTC_MODE_ACCURATE);
+        GB_set_rtc_mode(&gameboy[1], GB_RTC_MODE_ACCURATE);
         var.key = "sameboy_color_correction_mode_1";
         var.value = NULL;
         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) { 

@@ -22,6 +22,7 @@ static bool running = false;
 static char *filename;
 static char *bmp_filename;
 static char *log_filename;
+static char *sav_filename;
 static FILE *log_file;
 static void replace_extension(const char *src, size_t length, char *dest, const char *ext);
 static bool push_start_a, start_is_not_first, a_is_bad, b_is_confirm, push_faster, push_slower,
@@ -31,16 +32,23 @@ static unsigned int test_length = 60 * 40;
 GB_gameboy_t gb;
 
 static unsigned int frames = 0;
-const char bmp_header[] = {
-0x42, 0x4D, 0x48, 0x68, 0x01, 0x00, 0x00, 0x00,
-0x00, 0x00, 0x46, 0x00, 0x00, 0x00, 0x38, 0x00,
-0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x70, 0xFF,
-0xFF, 0xFF, 0x01, 0x00, 0x20, 0x00, 0x03, 0x00,
-0x00, 0x00, 0x02, 0x68, 0x01, 0x00, 0x12, 0x0B,
-0x00, 0x00, 0x12, 0x0B, 0x00, 0x00, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-0x00, 0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF,
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+static bool use_tga = false;
+static const uint8_t bmp_header[] = {
+    0x42, 0x4D, 0x48, 0x68, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x46, 0x00, 0x00, 0x00, 0x38, 0x00,
+    0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x70, 0xFF,
+    0xFF, 0xFF, 0x01, 0x00, 0x20, 0x00, 0x03, 0x00,
+    0x00, 0x00, 0x02, 0x68, 0x01, 0x00, 0x12, 0x0B,
+    0x00, 0x00, 0x12, 0x0B, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static const uint8_t tga_header[] = {
+    0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xA0, 0x00, 0x90, 0x00,
+    0x20, 0x28,
 };
 
 uint32_t bitmap[160*144];
@@ -139,7 +147,12 @@ static void vblank(GB_gameboy_t *gb)
         /* Let the test run for extra four seconds if the screen is off/disabled */
         if (!is_screen_blank || frames >= test_length + 60 * 4) {
             FILE *f = fopen(bmp_filename, "wb");
-            fwrite(&bmp_header, 1, sizeof(bmp_header), f);
+            if (use_tga) {
+                fwrite(&tga_header, 1, sizeof(tga_header), f);
+            }
+            else {
+                fwrite(&bmp_header, 1, sizeof(bmp_header), f);
+            }
             fwrite(&bitmap, 1, sizeof(bitmap), f);
             fclose(f);
             if (!gb->boot_rom_finished) {
@@ -147,6 +160,9 @@ static void vblank(GB_gameboy_t *gb)
             }
             if (is_screen_blank) {
                 GB_log(gb, "Game probably stuck with blank screen. \n");
+            }
+            if (sav_filename) {
+                GB_save_battery(gb, sav_filename);
             }
             running = false;
         }
@@ -215,6 +231,9 @@ static char *executable_relative_path(const char *filename)
 
 static uint32_t rgb_encode(GB_gameboy_t *gb, uint8_t r, uint8_t g, uint8_t b)
 {
+    if (use_tga) {
+        return (r << 16) | (g << 8) | (b);
+    }
     return (r << 24) | (g << 16) | (b << 8);
 }
 
@@ -244,7 +263,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "SameBoy Tester v" xstr(VERSION) "\n");
 
     if (argc == 1) {
-        fprintf(stderr, "Usage: %s [--dmg] [--start] [--length seconds] [--boot path to boot ROM]"
+        fprintf(stderr, "Usage: %s [--dmg] [--start] [--length seconds] [--sav] [--boot path to boot ROM]"
 #ifndef _WIN32
                         " [--jobs number of tests to run simultaneously]"
 #endif
@@ -258,6 +277,7 @@ int main(int argc, char **argv)
 #endif
 
     bool dmg = false;
+    bool sav = false;
     const char *boot_rom_path = NULL;
     
     GB_random_set_enabled(false);
@@ -266,6 +286,12 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--dmg") == 0) {
             fprintf(stderr, "Using DMG mode\n");
             dmg = true;
+            continue;
+        }
+        
+        if (strcmp(argv[i], "--tga") == 0) {
+            fprintf(stderr, "Using TGA output\n");
+            use_tga = true;
             continue;
         }
 
@@ -284,6 +310,12 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--boot") == 0 && i != argc - 1) {
             fprintf(stderr, "Using boot ROM %s\n", argv[i + 1]);
             boot_rom_path = argv[++i];
+            continue;
+        }
+        
+        if (strcmp(argv[i], "--sav") == 0) {
+            fprintf(stderr, "Saving a battery save\n");
+            sav = true;
             continue;
         }
         
@@ -312,12 +344,18 @@ int main(int argc, char **argv)
         size_t path_length = strlen(filename);
 
         char bitmap_path[path_length + 5]; /* At the worst case, size is strlen(path) + 4 bytes for .bmp + NULL */
-        replace_extension(filename, path_length, bitmap_path, ".bmp");
+        replace_extension(filename, path_length, bitmap_path, use_tga? ".tga" : ".bmp");
         bmp_filename = &bitmap_path[0];
         
         char log_path[path_length + 5];
         replace_extension(filename, path_length, log_path, ".log");
         log_filename = &log_path[0];
+        
+        char sav_path[path_length + 5];
+        if (sav) {
+            replace_extension(filename, path_length, sav_path, ".sav");
+            sav_filename = &sav_path[0];
+        }
         
         fprintf(stderr, "Testing ROM %s\n", filename);
         
@@ -342,6 +380,7 @@ int main(int argc, char **argv)
         GB_set_log_callback(&gb, log_callback);
         GB_set_async_input_callback(&gb, async_input_callback);
         GB_set_color_correction_mode(&gb, GB_COLOR_CORRECTION_EMULATE_HARDWARE);
+        GB_set_rtc_mode(&gb, GB_RTC_MODE_ACCURATE);
         
         if (GB_load_rom(&gb, filename)) {
             perror("Failed to load ROM");

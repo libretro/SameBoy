@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #include <Core/gb.h>
 #import <JoyKit/JoyKit.h>
+@class Document;
 
 typedef enum {
     GB_FRAME_BLENDING_MODE_DISABLED,
@@ -13,11 +14,12 @@ typedef enum {
 @interface GBView : NSView<JOYListener>
 - (void) flip;
 - (uint32_t *) pixels;
-@property GB_gameboy_t *gb;
+@property (nonatomic, weak) IBOutlet Document *document;
+@property (nonatomic) GB_gameboy_t *gb;
 @property (nonatomic) GB_frame_blending_mode_t frameBlendingMode;
-@property (getter=isMouseHidingEnabled) BOOL mouseHidingEnabled;
-@property bool isRewinding;
-@property NSView *internalView;
+@property (nonatomic, getter=isMouseHidingEnabled) BOOL mouseHidingEnabled;
+@property (nonatomic) bool isRewinding;
+@property (nonatomic, strong) NSView *internalView;
 - (void) createInternalView;
 - (uint32_t *)currentBuffer;
 - (uint32_t *)previousBuffer;

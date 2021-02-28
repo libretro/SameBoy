@@ -473,7 +473,7 @@ value_t debugger_evaluate(GB_gameboy_t *gb, const char *string,
                           size_t length, bool *error,
                           uint16_t *watchpoint_address, uint8_t *watchpoint_new_value)
 {
-    /* Disable watchpoints while evaulating expressions */
+    /* Disable watchpoints while evaluating expressions */
     uint16_t n_watchpoints = gb->n_watchpoints;
     gb->n_watchpoints = 0;
 
@@ -1778,10 +1778,17 @@ static bool apu(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugg
                gb->apu.square_channels[channel].current_sample_index >> 7 ? " (suppressed)" : "");
 
         if (channel == GB_SQUARE_1) {
-            GB_log(gb, "    Frequency sweep %s and %s (next in %u APU ticks)\n",
-                   gb->apu.sweep_enabled? "active" : "inactive",
-                   gb->apu.sweep_decreasing? "decreasing" : "increasing",
-                   gb->apu.square_sweep_calculate_countdown);
+            GB_log(gb, "    Frequency sweep %s and %s\n",
+                   ((gb->io_registers[GB_IO_NR10] & 0x7) && (gb->io_registers[GB_IO_NR10] & 0x70))? "active" : "inactive",
+                   (gb->io_registers[GB_IO_NR10] & 0x8) ? "decreasing" : "increasing");
+            if (gb->apu.square_sweep_calculate_countdown) {
+                GB_log(gb, "    On going frequency calculation will be ready in %u APU ticks\n",
+                       gb->apu.square_sweep_calculate_countdown);
+            }
+            else {
+                GB_log(gb, "    Shadow frequency register: 0x%03x\n", gb->apu.shadow_sweep_sample_length);
+                GB_log(gb, "    Sweep addend register: 0x%03x\n", gb->apu.sweep_length_addend);
+            }
         }
 
         if (gb->apu.square_channels[channel].length_enabled) {
@@ -1814,10 +1821,10 @@ static bool apu(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugg
 
 
     GB_log(gb, "\nCH4:\n");
-    GB_log(gb, "    Current volume: %u, current sample length: %u APU ticks (next in %u ticks)\n",
+    GB_log(gb, "    Current volume: %u, current internal counter: 0x%04x (next increase in %u ticks)\n",
         gb->apu.noise_channel.current_volume,
-        gb->apu.noise_channel.sample_length * 4 + 3,
-        gb->apu.noise_channel.sample_countdown);
+        gb->apu.noise_channel.counter,
+        gb->apu.noise_channel.counter_countdown);
 
     GB_log(gb, "    %u 256 Hz ticks till next volume %screase (out of %u)\n",
         gb->apu.noise_channel.volume_countdown,
@@ -1889,6 +1896,29 @@ static bool wave(GB_gameboy_t *gb, char *arguments, char *modifiers, const debug
     return true;
 }
 
+static bool undo(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugger_command_t *command)
+{
+    NO_MODIFIERS
+    if (strlen(lstrip(arguments))) {
+        print_usage(gb, command);
+        return true;
+    }
+    
+    if (!gb->undo_label) {
+        GB_log(gb, "No undo state available\n");
+        return true;
+    }
+    uint16_t pc = gb->pc;
+    GB_load_state_from_buffer(gb, gb->undo_state, GB_get_save_state_size(gb));
+    GB_log(gb, "Reverted a \"%s\" command.\n", gb->undo_label);
+    if (pc != gb->pc) {
+        GB_cpu_disassemble(gb, gb->pc, 5);
+    }
+    gb->undo_label = NULL;
+    
+    return true;
+}
+
 static bool help(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugger_command_t *command);
 
 #define HELP_NEWLINE "\n             "
@@ -1899,6 +1929,7 @@ static const debugger_command_t commands[] = {
     {"next", 1, next, "Run the next instruction, skipping over function calls"},
     {"step", 1, step, "Run the next instruction, stepping into function calls"},
     {"finish", 1, finish, "Run until the current function returns"},
+    {"undo", 1, undo, "Reverts the last command"},
     {"backtrace", 2, backtrace, "Displays the current call stack"},
     {"bt", 2, }, /* Alias */
     {"sld", 3, stack_leak_detection, "Like finish, but stops if a stack leak is detected"},
@@ -2184,7 +2215,30 @@ bool GB_debugger_execute_command(GB_gameboy_t *gb, char *input)
 
     const debugger_command_t *command = find_command(command_string);
     if (command) {
-        return command->implementation(gb, arguments, modifiers, command);
+        uint8_t *old_state = malloc(GB_get_save_state_size(gb));
+        GB_save_state_to_buffer(gb, old_state);
+        bool ret = command->implementation(gb, arguments, modifiers, command);
+        if (!ret) { // Command continues, save state in any case
+            free(gb->undo_state);
+            gb->undo_state = old_state;
+            gb->undo_label = command->command;
+        }
+        else {
+            uint8_t *new_state = malloc(GB_get_save_state_size(gb));
+            GB_save_state_to_buffer(gb, new_state);
+            if (memcmp(new_state, old_state, GB_get_save_state_size(gb)) != 0) {
+                // State changed, save the old state as the new undo state
+                free(gb->undo_state);
+                gb->undo_state = old_state;
+                gb->undo_label = command->command;
+            }
+            else {
+                // Nothing changed, just free the old state
+                free(old_state);
+            }
+            free(new_state);
+        }
+        return ret;
     }
     else {
         GB_log(gb, "%s: no such command.\n", command_string);
@@ -2260,6 +2314,11 @@ static jump_to_return_t test_jump_to_breakpoints(GB_gameboy_t *gb, uint16_t *add
 void GB_debugger_run(GB_gameboy_t *gb)
 {
     if (gb->debug_disable) return;
+    
+    if (!gb->undo_state) {
+        gb->undo_state = malloc(GB_get_save_state_size(gb));
+        GB_save_state_to_buffer(gb, gb->undo_state);
+    }
 
     char *input = NULL;
     if (gb->debug_next_command && gb->debug_call_depth <= 0 && !gb->halted) {

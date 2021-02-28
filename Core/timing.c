@@ -89,15 +89,32 @@ void GB_timing_sync(GB_gameboy_t *gb)
 }
 
 #endif
-static void GB_ir_run(GB_gameboy_t *gb)
+
+#define IR_DECAY 31500
+#define IR_THRESHOLD 19900
+#define IR_MAX IR_THRESHOLD * 2 + IR_DECAY
+
+static void GB_ir_run(GB_gameboy_t *gb, uint32_t cycles)
 {
-    if (gb->ir_queue_length == 0) return;
-    if (gb->cycles_since_input_ir_change >= gb->ir_queue[0].delay) {
-        gb->cycles_since_input_ir_change -= gb->ir_queue[0].delay;
-        gb->infrared_input = gb->ir_queue[0].state;
-        gb->ir_queue_length--;
-        memmove(&gb->ir_queue[0], &gb->ir_queue[1], sizeof(gb->ir_queue[0]) * (gb->ir_queue_length));
+    if (gb->model == GB_MODEL_AGB) return;
+    if (gb->infrared_input || gb->cart_ir || (gb->io_registers[GB_IO_RP] & 1)) {
+        gb->ir_sensor += cycles;
+        if (gb->ir_sensor > IR_MAX) {
+            gb->ir_sensor = IR_MAX;
+        }
+        
+        gb->effective_ir_input = gb->ir_sensor >= IR_THRESHOLD && gb->ir_sensor <= IR_THRESHOLD + IR_DECAY;
     }
+    else {
+        if (gb->ir_sensor <= cycles) {
+            gb->ir_sensor = 0;
+        }
+        else {
+            gb->ir_sensor -= cycles;
+        }
+        gb->effective_ir_input = false;
+    }
+    
 }
 
 static void advance_tima_state_machine(GB_gameboy_t *gb)
@@ -120,19 +137,27 @@ static void increase_tima(GB_gameboy_t *gb)
     }
 }
 
-static void GB_set_internal_div_counter(GB_gameboy_t *gb, uint32_t value)
+static void GB_set_internal_div_counter(GB_gameboy_t *gb, uint16_t value)
 {
     /* TIMA increases when a specific high-bit becomes a low-bit. */
     value &= INTERNAL_DIV_CYCLES - 1;
-    uint32_t triggers = gb->div_counter & ~value;
+    uint16_t triggers = gb->div_counter & ~value;
     if ((gb->io_registers[GB_IO_TAC] & 4) && (triggers & GB_TAC_TRIGGER_BITS[gb->io_registers[GB_IO_TAC] & 3])) {
         increase_tima(gb);
     }
     
     /* TODO: Can switching to double speed mode trigger an event? */
-    if (triggers & (gb->cgb_double_speed? 0x2000 : 0x1000)) {
+    uint16_t apu_bit = gb->cgb_double_speed? 0x2000 : 0x1000;
+    if (triggers & apu_bit) {
         GB_apu_run(gb);
         GB_apu_div_event(gb);
+    }
+    else {
+        uint16_t secondary_triggers = ~gb->div_counter & value;
+        if (secondary_triggers & apu_bit) {
+            GB_apu_run(gb);
+            GB_apu_div_secondary_event(gb);
+        }
     }
     gb->div_counter = value;
 }
@@ -140,7 +165,9 @@ static void GB_set_internal_div_counter(GB_gameboy_t *gb, uint32_t value)
 static void GB_timers_run(GB_gameboy_t *gb, uint8_t cycles)
 {
     if (gb->stopped) {
-        gb->apu.apu_cycles += 4 << !gb->cgb_double_speed;
+        if (GB_is_cgb(gb)) {
+            gb->apu.apu_cycles += 4 << !gb->cgb_double_speed;
+        }
         return;
     }
     
@@ -171,6 +198,9 @@ main:
 
 static void advance_serial(GB_gameboy_t *gb, uint8_t cycles)
 {
+    if (gb->printer.command_state || gb->printer.bits_received) {
+        gb->printer.idle_time += cycles;
+    }
     if (gb->serial_length == 0) {
         gb->serial_cycles += cycles;
         return;
@@ -213,6 +243,76 @@ static void advance_serial(GB_gameboy_t *gb, uint8_t cycles)
     
 }
 
+static void GB_rtc_run(GB_gameboy_t *gb, uint8_t cycles)
+{
+    if (gb->cartridge_type->mbc_type != GB_HUC3 && !gb->cartridge_type->has_rtc) return;
+    gb->rtc_cycles += cycles;
+    time_t current_time = 0;
+    
+    switch (gb->rtc_mode) {
+        case GB_RTC_MODE_SYNC_TO_HOST:
+            // Sync in a 1/32s resolution
+            if (gb->rtc_cycles < GB_get_unmultiplied_clock_rate(gb) / 16) return;
+            gb->rtc_cycles -= GB_get_unmultiplied_clock_rate(gb) / 16;
+            current_time = time(NULL);
+            break;
+        case GB_RTC_MODE_ACCURATE:
+            if (gb->cartridge_type->mbc_type != GB_HUC3 && (gb->rtc_real.high & 0x40)) {
+                gb->rtc_cycles -= cycles;
+                return;
+            }
+            if (gb->rtc_cycles < GB_get_unmultiplied_clock_rate(gb) * 2) return;
+            gb->rtc_cycles -= GB_get_unmultiplied_clock_rate(gb) * 2;
+            current_time = gb->last_rtc_second + 1;
+            break;
+    }
+
+    if (gb->cartridge_type->mbc_type == GB_HUC3) {
+        while (gb->last_rtc_second / 60 < current_time / 60) {
+            gb->last_rtc_second += 60;
+            gb->huc3_minutes++;
+            if (gb->huc3_minutes == 60 * 24) {
+                gb->huc3_days++;
+                gb->huc3_minutes = 0;
+            }
+        }
+        return;
+    }
+    
+    if ((gb->rtc_real.high & 0x40) == 0) { /* is timer running? */
+        while (gb->last_rtc_second + 60 * 60 * 24 < current_time) {
+            gb->last_rtc_second += 60 * 60 * 24;
+            if (++gb->rtc_real.days == 0) {
+                if (gb->rtc_real.high & 1) { /* Bit 8 of days*/
+                    gb->rtc_real.high |= 0x80; /* Overflow bit */
+                }
+                gb->rtc_real.high ^= 1;
+            }
+        }
+        
+        while (gb->last_rtc_second < current_time) {
+            gb->last_rtc_second++;
+            if (++gb->rtc_real.seconds != 60) continue;
+            gb->rtc_real.seconds = 0;
+            
+            if (++gb->rtc_real.minutes != 60) continue;
+            gb->rtc_real.minutes = 0;
+            
+            if (++gb->rtc_real.hours != 24) continue;
+            gb->rtc_real.hours = 0;
+            
+            if (++gb->rtc_real.days != 0) continue;
+            
+            if (gb->rtc_real.high & 1) { /* Bit 8 of days*/
+                gb->rtc_real.high |= 0x80; /* Overflow bit */
+            }
+            
+            gb->rtc_real.high ^= 1;
+        }
+    }
+}
+
+
 void GB_advance_cycles(GB_gameboy_t *gb, uint8_t cycles)
 {
     gb->apu.pcm_mask[0] = gb->apu.pcm_mask[1] = 0xFF; // Sort of hacky, but too many cross-component interactions to do it right
@@ -231,11 +331,11 @@ void GB_advance_cycles(GB_gameboy_t *gb, uint8_t cycles)
     }
     
     // Not affected by speed boost
-    gb->double_speed_alignment += cycles;
+    if (gb->io_registers[GB_IO_LCDC] & 0x80) {
+        gb->double_speed_alignment += cycles;
+    }
     gb->hdma_cycles += cycles;
     gb->apu_output.sample_cycles += cycles;
-    gb->cycles_since_ir_change += cycles;
-    gb->cycles_since_input_ir_change += cycles;
     gb->cycles_since_last_sync += cycles;
     gb->cycles_since_run += cycles;
     
@@ -252,7 +352,8 @@ void GB_advance_cycles(GB_gameboy_t *gb, uint8_t cycles)
     }
     GB_apu_run(gb);
     GB_display_run(gb, cycles);
-    GB_ir_run(gb);
+    GB_ir_run(gb, cycles);
+    GB_rtc_run(gb, cycles);
 }
 
 /* 
@@ -273,55 +374,6 @@ void GB_emulate_timer_glitch(GB_gameboy_t *gb, uint8_t old_tac, uint8_t new_tac)
         /* And now either the timer must be disabled, or the new bit used for overflow testing be 0. */
         if (!(new_tac & 4) || gb->div_counter & new_clocks) {
             increase_tima(gb);
-        }
-    }
-}
-
-void GB_rtc_run(GB_gameboy_t *gb)
-{
-    if (gb->cartridge_type->mbc_type == GB_HUC3) {
-        time_t current_time = time(NULL);
-        while (gb->last_rtc_second / 60 < current_time / 60) {
-            gb->last_rtc_second += 60;
-            gb->huc3_minutes++;
-            if (gb->huc3_minutes == 60 * 24) {
-                gb->huc3_days++;
-                gb->huc3_minutes = 0;
-            }
-        }
-        return;
-    }
-    
-    if ((gb->rtc_real.high & 0x40) == 0) { /* is timer running? */
-        time_t current_time = time(NULL);
-        
-        while (gb->last_rtc_second + 60 * 60 * 24 < current_time) {
-            gb->last_rtc_second += 60 * 60 * 24;
-            if (++gb->rtc_real.days == 0) {
-                if (gb->rtc_real.high & 1) { /* Bit 8 of days*/
-                    gb->rtc_real.high |= 0x80; /* Overflow bit */
-                }
-                gb->rtc_real.high ^= 1;
-            }
-        }
-        
-        while (gb->last_rtc_second < current_time) {
-            gb->last_rtc_second++;
-            if (++gb->rtc_real.seconds == 60) { 
-                gb->rtc_real.seconds = 0;
-                if (++gb->rtc_real.minutes == 60) { 
-                    gb->rtc_real.minutes = 0;
-                    if (++gb->rtc_real.hours == 24) { 
-                        gb->rtc_real.hours = 0;
-                        if (++gb->rtc_real.days == 0) { 
-                            if (gb->rtc_real.high & 1) { /* Bit 8 of days*/
-                                gb->rtc_real.high |= 0x80; /* Overflow bit */
-                            }
-                            gb->rtc_real.high ^= 1;
-                        }
-                    }
-                }
-            }
         }
     }
 }

@@ -81,8 +81,27 @@
     if ([anItem action] == @selector(toggleDeveloperMode:)) {
         [(NSMenuItem *)anItem setState:[[NSUserDefaults standardUserDefaults] boolForKey:@"DeveloperMode"]];
     }
-
+    
+    if (anItem == self.linkCableMenuItem) {
+        return [[NSDocumentController sharedDocumentController] documents].count > 1;
+    }
     return true;
+}
+
+- (void)menuNeedsUpdate:(NSMenu *)menu
+{
+    NSMutableArray *items = [NSMutableArray array];
+    NSDocument *currentDocument = [[NSDocumentController sharedDocumentController] currentDocument];
+    
+    for (NSDocument *document in [[NSDocumentController sharedDocumentController] documents]) {
+        if (document == currentDocument) continue;
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:document.displayName action:@selector(connectLinkCable:) keyEquivalent:@""];
+        item.representedObject = document;
+        item.image = [[NSWorkspace sharedWorkspace] iconForFile:document.fileURL.path];
+        [item.image setSize:NSMakeSize(16, 16)];
+        [items addObject:item];
+    }
+    menu.itemArray = items;
 }
 
 - (IBAction) showPreferences: (id) sender
@@ -101,12 +120,23 @@
 
 - (BOOL)applicationOpenUntitledFile:(NSApplication *)sender
 {
+    /* Bring an existing panel to the foreground */
+    for (NSWindow *window in [[NSApplication sharedApplication] windows]) {
+        if ([window isKindOfClass:[NSOpenPanel class]]) {
+            [(NSOpenPanel *)window makeKeyAndOrderFront:nil];
+            return true;
+        }
+    }
     [[NSDocumentController sharedDocumentController] openDocument:self];
-    return YES;
+    return true;
 }
 
 - (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification
 {
     [[NSDocumentController sharedDocumentController] openDocumentWithContentsOfFile:notification.identifier display:YES];
+}
+
+- (IBAction)nop:(id)sender
+{
 }
 @end
