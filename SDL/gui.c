@@ -18,6 +18,7 @@ SDL_Texture *texture = NULL;
 SDL_PixelFormat *pixel_format = NULL;
 enum pending_command pending_command;
 unsigned command_parameter;
+char *dropped_state_file = NULL;
 
 #ifdef __APPLE__
 #define MODIFIER_NAME " " CMD_STRING
@@ -675,6 +676,7 @@ static void cycle_border_mode_backwards(unsigned index)
     }
 }
 
+extern bool uses_gl(void);
 struct shader_name {
     const char *file_name;
     const char *display_name;
@@ -698,6 +700,7 @@ struct shader_name {
 
 static void cycle_filter(unsigned index)
 {
+    if (!uses_gl()) return;
     unsigned i = 0;
     for (; i < sizeof(shaders) / sizeof(shaders[0]); i++) {
         if (strcmp(shaders[i].file_name, configuration.filter) == 0) {
@@ -720,6 +723,7 @@ static void cycle_filter(unsigned index)
 
 static void cycle_filter_backwards(unsigned index)
 {
+    if (!uses_gl()) return;
     unsigned i = 0;
     for (; i < sizeof(shaders) / sizeof(shaders[0]); i++) {
         if (strcmp(shaders[i].file_name, configuration.filter) == 0) {
@@ -741,6 +745,7 @@ static void cycle_filter_backwards(unsigned index)
 }
 const char *current_filter_name(unsigned index)
 {
+    if (!uses_gl()) return "Requires OpenGL 3.2+";
     unsigned i = 0;
     for (; i < sizeof(shaders) / sizeof(shaders[0]); i++) {
         if (strcmp(shaders[i].file_name, configuration.filter) == 0) {
@@ -757,6 +762,7 @@ const char *current_filter_name(unsigned index)
 
 static void cycle_blending_mode(unsigned index)
 {
+        if (!uses_gl()) return;
     if (configuration.blending_mode == GB_FRAME_BLENDING_MODE_ACCURATE) {
         configuration.blending_mode = GB_FRAME_BLENDING_MODE_DISABLED;
     }
@@ -767,6 +773,7 @@ static void cycle_blending_mode(unsigned index)
 
 static void cycle_blending_mode_backwards(unsigned index)
 {
+    if (!uses_gl()) return;
     if (configuration.blending_mode == GB_FRAME_BLENDING_MODE_DISABLED) {
         configuration.blending_mode = GB_FRAME_BLENDING_MODE_ACCURATE;
     }
@@ -777,6 +784,7 @@ static void cycle_blending_mode_backwards(unsigned index)
 
 const char *blending_mode_string(unsigned index)
 {
+    if (!uses_gl()) return "Requires OpenGL 3.2+";
     return (const char *[]){"Disabled", "Simple", "Accurate"}
     [configuration.blending_mode];
 }
@@ -913,10 +921,7 @@ static const struct menu_item controls_menu[] = {
 
 static const char *key_name(unsigned index)
 {
-    if (index >= 8) {
-        if (index == 8) {
-            return SDL_GetScancodeName(configuration.keys[8]);
-        }
+    if (index > 8) {
         return SDL_GetScancodeName(configuration.keys_2[index - 9]);
     }
     return SDL_GetScancodeName(configuration.keys[index]);
@@ -1300,9 +1305,21 @@ void run_gui(bool is_running)
                 break;
             }
             case SDL_DROPFILE: {
-                set_filename(event.drop.file, SDL_free);
-                pending_command = GB_SDL_NEW_FILE_COMMAND;
-                return;
+                if (GB_is_stave_state(event.drop.file)) {
+                    if (GB_is_inited(&gb)) {
+                        dropped_state_file = event.drop.file;
+                        pending_command = GB_SDL_LOAD_STATE_FROM_FILE_COMMAND;
+                    }
+                    else {
+                        SDL_free(event.drop.file);
+                    }
+                    break;
+                }
+                else {
+                    set_filename(event.drop.file, SDL_free);
+                    pending_command = GB_SDL_NEW_FILE_COMMAND;
+                    return;
+                }
             }
             case SDL_JOYBUTTONDOWN:
             {
@@ -1355,7 +1372,17 @@ void run_gui(bool is_running)
                 
 
             case SDL_KEYDOWN:
-                if (event_hotkey_code(&event) == SDL_SCANCODE_F && event.key.keysym.mod & MODIFIER) {
+                if (gui_state == WAITING_FOR_KEY) {
+                    if (current_selection > 8) {
+                        configuration.keys_2[current_selection - 9] = event.key.keysym.scancode;
+                    }
+                    else {
+                        configuration.keys[current_selection] = event.key.keysym.scancode;
+                    }
+                    gui_state = SHOWING_MENU;
+                    should_render = true;
+                }
+                else if (event_hotkey_code(&event) == SDL_SCANCODE_F && event.key.keysym.mod & MODIFIER) {
                     if ((SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) == false) {
                         SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
                     }
@@ -1364,7 +1391,7 @@ void run_gui(bool is_running)
                     }
                     update_viewport();
                 }
-                if (event_hotkey_code(&event) == SDL_SCANCODE_O) {
+                else if (event_hotkey_code(&event) == SDL_SCANCODE_O) {
                     if (event.key.keysym.mod & MODIFIER) {
                         char *filename = do_open_rom_dialog();
                         if (filename) {
@@ -1455,21 +1482,6 @@ void run_gui(bool is_running)
                     if (current_help_page == sizeof(help) / sizeof(help[0])) {
                         gui_state = SHOWING_MENU;
                     }
-                    should_render = true;
-                }
-                else if (gui_state == WAITING_FOR_KEY) {
-                    if (current_selection >= 8) {
-                        if (current_selection == 8) {
-                            configuration.keys[8] = event.key.keysym.scancode;
-                        }
-                        else {
-                            configuration.keys_2[current_selection - 9] = event.key.keysym.scancode;
-                        }
-                    }
-                    else {
-                        configuration.keys[current_selection] = event.key.keysym.scancode;
-                    }
-                    gui_state = SHOWING_MENU;
                     should_render = true;
                 }
                 break;

@@ -29,6 +29,9 @@
     NSPopUpButton *_rumbleModePopupButton;
     NSSlider *_temperatureSlider;
     NSSlider *_interferenceSlider;
+    NSSlider *_volumeSlider;
+    NSButton *_autoUpdatesCheckbox;
+
 }
 
 + (NSArray *)filterList
@@ -120,6 +123,17 @@
 - (NSSlider *)interferenceSlider
 {
     return _interferenceSlider;
+}
+
+- (void)setVolumeSlider:(NSSlider *)volumeSlider
+{
+    _volumeSlider = volumeSlider;
+    [volumeSlider setDoubleValue:[[NSUserDefaults standardUserDefaults] doubleForKey:@"GBVolume"] * 256];
+}
+
+- (NSSlider *)volumeSlider
+{
+    return _volumeSlider;
 }
 
 - (void)setFrameBlendingModePopupButton:(NSPopUpButton *)frameBlendingModePopupButton
@@ -329,12 +343,17 @@
     [[NSNotificationCenter defaultCenter] postNotificationName:@"GBLightTemperatureChanged" object:nil];
 }
 
-- (IBAction)volumeTemperatureChanged:(id)sender
+- (IBAction)interferenceVolumeChanged:(id)sender
 {
     [[NSUserDefaults standardUserDefaults] setObject:@([sender doubleValue] / 256.0)
                                               forKey:@"GBInterferenceVolume"];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"GBInterferenceVolumeChanged" object:nil];
+}
 
+- (IBAction)volumeChanged:(id)sender
+{
+    [[NSUserDefaults standardUserDefaults] setObject:@([sender doubleValue] / 256.0)
+                                              forKey:@"GBVolume"];
 }
 
 - (IBAction)franeBlendingModeChanged:(id)sender
@@ -379,6 +398,12 @@
                                               forKey:@"GBRTCMode"];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"GBRTCModeChanged" object:nil];
 
+}
+
+- (IBAction)changeAutoUpdates:(id)sender
+{
+    [[NSUserDefaults standardUserDefaults] setBool: [(NSButton *)sender state] == NSOnState
+                                            forKey:@"GBAutoUpdatesEnabled"];
 }
 
 - (IBAction) configureJoypad:(id)sender
@@ -704,5 +729,16 @@
         default_joypads[player_string] = [[sender selectedItem] identifier];
     }
     [[NSUserDefaults standardUserDefaults] setObject:default_joypads forKey:@"JoyKitDefaultControllers"];
+}
+
+- (NSButton *)autoUpdatesCheckbox
+{
+    return _autoUpdatesCheckbox;
+}
+
+- (void)setAutoUpdatesCheckbox:(NSButton *)autoUpdatesCheckbox
+{
+    _autoUpdatesCheckbox = autoUpdatesCheckbox;
+    [_autoUpdatesCheckbox setState: [[NSUserDefaults standardUserDefaults] boolForKey:@"GBAutoUpdatesEnabled"]];
 }
 @end

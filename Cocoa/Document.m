@@ -318,6 +318,11 @@ static void infraredStateChanged(GB_gameboy_t *gb, bool on)
 
 - (void) vblank
 {
+    if (_gbsVisualizer) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [_gbsVisualizer setNeedsDisplay:YES];
+        });
+    }
     [self.view flip];
     if (borderModeChanged) {
         dispatch_sync(dispatch_get_main_queue(), ^{
@@ -344,6 +349,9 @@ static void infraredStateChanged(GB_gameboy_t *gb, bool on)
 
 - (void)gotNewSample:(GB_sample_t *)sample
 {
+    if (_gbsVisualizer) {
+        [_gbsVisualizer addSample:sample];
+    }
     [audioLock lock];
     if (self.audioClient.isPlaying) {
         if (audioBufferPosition == audioBufferSize) {
@@ -360,6 +368,11 @@ static void infraredStateChanged(GB_gameboy_t *gb, bool on)
                 audioBufferSize += audioBufferSize >> 2;
             }
             audioBuffer = realloc(audioBuffer, sizeof(*sample) * audioBufferSize);
+        }
+        double volume = [[NSUserDefaults standardUserDefaults] doubleForKey:@"GBVolume"];
+        if (volume != 1) {
+            sample->left *= volume;
+            sample->right *= volume;
         }
         audioBuffer[audioBufferPosition++] = *sample;
     }
@@ -513,6 +526,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 
 - (void) start
 {
+    self.gbsPlayPauseButton.state = true;
     self.view.mouseHidingEnabled = (self.mainWindow.styleMask & NSWindowStyleMaskFullScreen) != 0;
     if (master) {
         [master start];
@@ -524,6 +538,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 
 - (void) stop
 {
+    self.gbsPlayPauseButton.state = false;
     if (master) {
         if (!master->running) return;
         GB_debugger_set_disabled(&gb, true);
@@ -766,9 +781,15 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     [self initCommon];
     self.view.gb = &gb;
     [self.view screenSizeChanged];
-    [self loadROM];
-    [self reset:nil];
-
+    if ([self loadROM]) {
+        _mainWindow.alphaValue = 0; // Hack hack ugly hack
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self close];
+        });
+    }
+    else {
+        [self reset:nil];
+    }
 }
 
 - (void) initMemoryView
@@ -834,17 +855,98 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     return YES;
 }
 
-- (void) loadROM
+- (IBAction)changeGBSTrack:(id)sender
 {
-    NSString *rom_warnings = [self captureOutputForBlock:^{
-        GB_debugger_clear_symbols(&gb);
-        if ([[self.fileType pathExtension] isEqualToString:@"isx"]) {
-            GB_load_isx(&gb, self.fileURL.path.UTF8String);
-            GB_load_battery(&gb, [[self.fileURL URLByDeletingPathExtension] URLByAppendingPathExtension:@"ram"].path.UTF8String);
-
+    if (!running) {
+        [self start];
+    }
+    [self performAtomicBlock:^{
+        GB_gbs_switch_track(&gb, self.gbsTracks.indexOfSelectedItem);
+    }];
+}
+- (IBAction)gbsNextPrevPushed:(id)sender
+{
+    if (self.gbsNextPrevButton.selectedSegment == 0) {
+        // Previous
+        if (self.gbsTracks.indexOfSelectedItem == 0) {
+            [self.gbsTracks selectItemAtIndex:self.gbsTracks.numberOfItems - 1];
         }
         else {
-            GB_load_rom(&gb, [self.fileURL.path UTF8String]);
+            [self.gbsTracks selectItemAtIndex:self.gbsTracks.indexOfSelectedItem - 1];
+        }
+    }
+    else {
+        // Next
+        if (self.gbsTracks.indexOfSelectedItem == self.gbsTracks.numberOfItems - 1) {
+            [self.gbsTracks selectItemAtIndex: 0];
+        }
+        else {
+            [self.gbsTracks selectItemAtIndex:self.gbsTracks.indexOfSelectedItem + 1];
+        }
+    }
+    [self changeGBSTrack:sender];
+}
+
+- (void)prepareGBSInterface: (GB_gbs_info_t *)info
+{
+    GB_set_rendering_disabled(&gb, true);
+    _view = nil;
+    for (NSView *view in _mainWindow.contentView.subviews) {
+        [view removeFromSuperview];
+    }
+    [[NSBundle mainBundle] loadNibNamed:@"GBS" owner:self topLevelObjects:nil];
+    [_mainWindow setContentSize:self.gbsPlayerView.bounds.size];
+    _mainWindow.styleMask &= ~NSWindowStyleMaskResizable;
+    dispatch_async(dispatch_get_main_queue(), ^{ // Cocoa is weird, no clue why it's needed
+        [_mainWindow standardWindowButton:NSWindowZoomButton].enabled = false;
+    });
+    [_mainWindow.contentView addSubview:self.gbsPlayerView];
+    _mainWindow.movableByWindowBackground = true;
+    [_mainWindow setContentBorderThickness:24 forEdge:NSRectEdgeMinY];
+
+    self.gbsTitle.stringValue = [NSString stringWithCString:info->title encoding:NSISOLatin1StringEncoding] ?: @"GBS Player";
+    self.gbsAuthor.stringValue = [NSString stringWithCString:info->author encoding:NSISOLatin1StringEncoding] ?: @"Unknown Composer";
+    NSString *copyright = [NSString stringWithCString:info->copyright encoding:NSISOLatin1StringEncoding];
+    if (copyright) {
+        copyright = [@"©" stringByAppendingString:copyright];
+    }
+    self.gbsCopyright.stringValue = copyright ?: @"Missing copyright information";
+    for (unsigned i = 0; i < info->track_count; i++) {
+        [self.gbsTracks addItemWithTitle:[NSString stringWithFormat:@"Track %u", i + 1]];
+    }
+    [self.gbsTracks selectItemAtIndex:info->first_track];
+    self.gbsPlayPauseButton.image.template = true;
+    self.gbsPlayPauseButton.alternateImage.template = true;
+    self.gbsRewindButton.image.template = true;
+    for (unsigned i = 0; i < 2; i++) {
+        [self.gbsNextPrevButton imageForSegment:i].template = true;
+    }
+
+    if (!self.audioClient.isPlaying) {
+        [self.audioClient start];
+    }
+    
+    if (@available(macOS 10.10, *)) {
+        _mainWindow.titlebarAppearsTransparent = true;
+    }
+}
+
+- (int) loadROM
+{
+    __block int ret = 0;
+    NSString *rom_warnings = [self captureOutputForBlock:^{
+        GB_debugger_clear_symbols(&gb);
+        if ([[[self.fileType pathExtension] lowercaseString] isEqualToString:@"isx"]) {
+            ret = GB_load_isx(&gb, self.fileURL.path.UTF8String);
+            GB_load_battery(&gb, [[self.fileURL URLByDeletingPathExtension] URLByAppendingPathExtension:@"ram"].path.UTF8String);
+        }
+        else if ([[[self.fileType pathExtension] lowercaseString] isEqualToString:@"gbs"]) {
+            __block GB_gbs_info_t info;
+            ret = GB_load_gbs(&gb, self.fileURL.path.UTF8String, &info);
+            [self prepareGBSInterface:&info];
+        }
+        else {
+            ret = GB_load_rom(&gb, [self.fileURL.path UTF8String]);
         }
         GB_load_battery(&gb, [[self.fileURL URLByDeletingPathExtension] URLByAppendingPathExtension:@"sav"].path.UTF8String);
         GB_load_cheats(&gb, [[self.fileURL URLByDeletingPathExtension] URLByAppendingPathExtension:@"cht"].path.UTF8String);
@@ -852,17 +954,26 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
         GB_debugger_load_symbol_file(&gb, [[[NSBundle mainBundle] pathForResource:@"registers" ofType:@"sym"] UTF8String]);
         GB_debugger_load_symbol_file(&gb, [[self.fileURL URLByDeletingPathExtension] URLByAppendingPathExtension:@"sym"].path.UTF8String);
     }];
-    if (rom_warnings && !rom_warning_issued) {
+    if (ret) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert setMessageText:rom_warnings?: @"Could not load ROM"];
+        [alert setAlertStyle:NSAlertStyleCritical];
+        [alert runModal];
+    }
+    else if (rom_warnings && !rom_warning_issued) {
         rom_warning_issued = true;
         [GBWarningPopover popoverWithContents:rom_warnings onWindow:self.mainWindow];
     }
+    return ret;
 }
 
 - (void)close
 {
     [self disconnectLinkCable];
-    [[NSUserDefaults standardUserDefaults] setInteger:self.mainWindow.frame.size.width forKey:@"LastWindowWidth"];
-    [[NSUserDefaults standardUserDefaults] setInteger:self.mainWindow.frame.size.height forKey:@"LastWindowHeight"];
+    if (!self.gbsPlayerView) {
+        [[NSUserDefaults standardUserDefaults] setInteger:self.mainWindow.frame.size.width forKey:@"LastWindowWidth"];
+        [[NSUserDefaults standardUserDefaults] setInteger:self.mainWindow.frame.size.height forKey:@"LastWindowHeight"];
+    }
     [self stop];
     [self.consoleWindow close];
     [self.memoryWindow close];
@@ -888,6 +999,9 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     }
     else {
         [self.audioClient start];
+        if ([[NSUserDefaults standardUserDefaults] doubleForKey:@"GBVolume"] == 0) {
+            [GBWarningPopover popoverWithContents:@"Warning: Volume is set to to zero in the preferences panel" onWindow:self.mainWindow];
+        }
     }
     [[NSUserDefaults standardUserDefaults] setBool:!self.audioClient.isPlaying forKey:@"Mute"];
 }
@@ -1172,19 +1286,32 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     }
 }
 
-- (IBAction)loadState:(id)sender
+- (int)loadStateFile:(const char *)path noErrorOnNotFound:(bool)noErrorOnFileNotFound;
 {
-    bool __block success = false;
+    int __block result = false;
     NSString *error =
     [self captureOutputForBlock:^{
-        success = GB_load_state(&gb, [[self.fileURL URLByDeletingPathExtension] URLByAppendingPathExtension:[NSString stringWithFormat:@"s%ld", (long)[sender tag] ]].path.UTF8String) == 0;
+        result = GB_load_state(&gb, path);
     }];
     
-    if (!success) {
-        if (error) {
-            [GBWarningPopover popoverWithContents:error onWindow:self.mainWindow];
-        }
+    if (result == ENOENT && noErrorOnFileNotFound) {
+        return ENOENT;
+    }
+    
+    if (result) {
         NSBeep();
+    }
+    if (error) {
+        [GBWarningPopover popoverWithContents:error onWindow:self.mainWindow];
+    }
+    return result;
+}
+
+- (IBAction)loadState:(id)sender
+{
+    int ret = [self loadStateFile:[[self.fileURL URLByDeletingPathExtension] URLByAppendingPathExtension:[NSString stringWithFormat:@"s%ld", (long)[sender tag]]].path.UTF8String noErrorOnNotFound:true];
+    if (ret == ENOENT) {
+        [self loadStateFile:[[self.fileURL URLByDeletingPathExtension] URLByAppendingPathExtension:[NSString stringWithFormat:@"sn%ld", (long)[sender tag]]].path.UTF8String noErrorOnNotFound:false];
     }
 }
 
@@ -1474,7 +1601,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 
 - (void)cameraRequestUpdate
 {
-    dispatch_async(dispatch_get_global_queue( DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @try {
             if (!cameraSession) {
                 if (@available(macOS 10.14, *)) {

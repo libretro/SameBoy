@@ -25,5 +25,7 @@
 @property (nonatomic, weak) IBOutlet NSPopUpButton *cgbPopupButton;
 @property (nonatomic, weak) IBOutlet NSPopUpButton *preferredJoypadButton;
 @property (nonatomic, weak) IBOutlet NSPopUpButton *playerListButton;
+@property (nonatomic, weak) IBOutlet NSButton *autoUpdatesCheckbox;
+@property (weak) IBOutlet NSSlider *volumeSlider;
 
 @end

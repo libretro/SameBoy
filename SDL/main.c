@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <ctype.h>
+#include <errno.h>
 #include <OpenDialog/open_dialog.h>
 #include <SDL.h>
 #include <Core/gb.h>
@@ -25,8 +26,13 @@ static double clock_mutliplier = 1.0;
 
 static char *filename = NULL;
 static typeof(free) *free_function = NULL;
-static char *battery_save_path_ptr;
+static char *battery_save_path_ptr = NULL;
+static SDL_GLContext gl_context = NULL;
 
+bool uses_gl(void)
+{
+    return gl_context;
+}
 
 void set_filename(const char *new_filename, typeof(free) *new_free_function)
 {
@@ -58,7 +64,7 @@ static void start_capturing_logs(void)
     GB_set_log_callback(&gb, log_capture_callback);
 }
 
-static const char *end_capturing_logs(bool show_popup, bool should_exit)
+static const char *end_capturing_logs(bool show_popup, bool should_exit, uint32_t popup_flags, const char *title)
 {
     GB_set_log_callback(&gb, NULL);
     if (captured_log[0] == 0) {
@@ -67,7 +73,7 @@ static const char *end_capturing_logs(bool show_popup, bool should_exit)
     }
     else {
         if (show_popup) {
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", captured_log, window);
+            SDL_ShowSimpleMessageBox(popup_flags, title, captured_log, window);
         }
         if (should_exit) {
             exit(1);
@@ -142,8 +148,14 @@ static void handle_events(GB_gameboy_t *gb)
                 break;
                 
             case SDL_DROPFILE: {
-                set_filename(event.drop.file, SDL_free);
-                pending_command = GB_SDL_NEW_FILE_COMMAND;
+                if (GB_is_stave_state(event.drop.file)) {
+                    dropped_state_file = event.drop.file;
+                    pending_command = GB_SDL_LOAD_STATE_FROM_FILE_COMMAND;
+                }
+                else {
+                    set_filename(event.drop.file, SDL_free);
+                    pending_command = GB_SDL_NEW_FILE_COMMAND;
+                }
                 break;
             }
                 
@@ -418,21 +430,43 @@ static bool handle_pending_command(void)
     switch (pending_command) {
         case GB_SDL_LOAD_STATE_COMMAND:
         case GB_SDL_SAVE_STATE_COMMAND: {
-            char save_path[strlen(filename) + 4];
+            char save_path[strlen(filename) + 5];
             char save_extension[] = ".s0";
             save_extension[2] += command_parameter;
             replace_extension(filename, strlen(filename), save_path, save_extension);
             
             start_capturing_logs();
+            bool success;
             if (pending_command == GB_SDL_LOAD_STATE_COMMAND) {
-                GB_load_state(&gb, save_path);
+                int result = GB_load_state(&gb, save_path);
+                if (result == ENOENT) {
+                    char save_extension[] = ".sn0";
+                    save_extension[3] += command_parameter;
+                    replace_extension(filename, strlen(filename), save_path, save_extension);
+                    start_capturing_logs();
+                    result = GB_load_state(&gb, save_path);
+                }
+                success = result == 0;
             }
             else {
-                GB_save_state(&gb, save_path);
+                success = GB_save_state(&gb, save_path) == 0;
             }
-            end_capturing_logs(true, false);
+            end_capturing_logs(true,
+                               false,
+                               success? SDL_MESSAGEBOX_INFORMATION : SDL_MESSAGEBOX_ERROR,
+                               success? "Notice" : "Error");
             return false;
         }
+    
+        case GB_SDL_LOAD_STATE_FROM_FILE_COMMAND:
+            start_capturing_logs();
+            bool success = GB_load_state(&gb, dropped_state_file) == 0;
+            end_capturing_logs(true,
+                               false,
+                               success? SDL_MESSAGEBOX_INFORMATION : SDL_MESSAGEBOX_ERROR,
+                               success? "Notice" : "Error");
+            SDL_free(dropped_state_file);
+            return false;
             
         case GB_SDL_NO_COMMAND:
             return false;
@@ -470,7 +504,7 @@ static void load_boot_rom(GB_gameboy_t *gb, GB_boot_rom_t type)
     if (use_built_in) {
         start_capturing_logs();
         GB_load_boot_rom(gb, resource_path(names[type]));
-        end_capturing_logs(true, false);
+        end_capturing_logs(true, false, SDL_MESSAGEBOX_ERROR, "Error");
     }
 }
 
@@ -543,7 +577,7 @@ restart:
     else {
         GB_load_rom(&gb, filename);
     }
-    end_capturing_logs(true, error);
+    end_capturing_logs(true, error, SDL_MESSAGEBOX_WARNING, "Warning");
     
     
     /* Configure battery */
@@ -623,9 +657,10 @@ int main(int argc, char **argv)
     fprintf(stderr, "SameBoy v" xstr(VERSION) "\n");
     
     bool fullscreen = get_arg_flag("--fullscreen", &argc, argv);
+    bool nogl = get_arg_flag("--nogl", &argc, argv);
 
-    if (argc > 2) {
-        fprintf(stderr, "Usage: %s [--fullscreen] [rom]\n", argv[0]);
+    if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
+        fprintf(stderr, "Usage: %s [--fullscreen] [--nogl] [rom]\n", argv[0]);
         exit(1);
     }
     
@@ -690,13 +725,15 @@ int main(int argc, char **argv)
         SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
     }
     
-    SDL_GLContext gl_context = SDL_GL_CreateContext(window);
+    gl_context = nogl? NULL : SDL_GL_CreateContext(window);
     
     GLint major = 0, minor = 0;
-    glGetIntegerv(GL_MAJOR_VERSION, &major);
-    glGetIntegerv(GL_MINOR_VERSION, &minor);
+    if (gl_context) {
+        glGetIntegerv(GL_MAJOR_VERSION, &major);
+        glGetIntegerv(GL_MINOR_VERSION, &minor);
+    }
     
-    if (major * 0x100 + minor < 0x302) {
+    if (gl_context && major * 0x100 + minor < 0x302) {
         SDL_GL_DeleteContext(gl_context);
         gl_context = NULL;
     }
